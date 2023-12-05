@@ -16,27 +16,16 @@ static int wfs_write(const char *path, const char *buf, size_t size, off_t offse
 static int wfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi);
 static int wfs_unlink(const char *path);
 
-// Initialize fuse_operations structure
 static struct fuse_operations wfs_oper = {
-    .getattr = wfs_getattr,
-    .mknod = wfs_mknod,
-    .mkdir = wfs_mkdir,
-    .read = wfs_read,
-    .write = wfs_write,
-    .readdir = wfs_readdir,
-    .unlink = wfs_unlink,
-    // Add other operations as needed
+    .getattr	= wfs_getattr,
+    .mknod      = wfs_mknod,
+    .mkdir      = wfs_mkdir,
+    .read	    = wfs_read,
+    .write      = wfs_write,
+    .readdir	= wfs_readdir,
+    .unlink    	= wfs_unlink,
 };
 
-int main(int argc, char *argv[]) {
-    // Ensure that '-s' (single-threaded mode) is always passed to fuse_main
-    char *new_argv[argc + 2];
-    memcpy(new_argv, argv, sizeof(char *) * argc);
-    new_argv[argc] = "-s";
-    new_argv[argc + 1] = NULL;
-
-    return fuse_main(argc + 1, new_argv, &wfs_oper, NULL);
-}
 
 // Implement filesystem operations here
 // For example:
@@ -194,4 +183,12 @@ static int wfs_unlink(const char *path) {
     // indicating that the file has been deleted
 
     return 0;
+}
+
+int main(int argc, char *argv[]) {
+    // Ensure that '-s' (single-threaded mode) is always passed to fuse_main
+    argv[argc-2] = argv[argc-1];
+    argv[argc-1] = NULL;
+    --argc;
+    return fuse_main(argc, argv, &wfs_oper, NULL);
 }
