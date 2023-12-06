@@ -1,4 +1,4 @@
-#define FUSE_USE_VERSION 26
+#define FUSE_USE_VERSION 30
 
 #include <fuse.h>
 #include <stdio.h>
@@ -33,67 +33,82 @@ static struct fuse_operations ops = {
 };
 
 static int wfs_getattr(const char *path, struct stat *stbuf) {
+    //read the superblock
+    struct wfs_sb superblock;
+    if (read(disk_fd, &superblock, sizeof(superblock)) != sizeof(superblock)) {
+        perror("Error reading superblock");
+        close(disk_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    //go past superblock
+    if (lseek(disk_fd, superblock.head, SEEK_SET) == -1) {
+        perror("Error seeking to the position after superblock");
+        close(disk_fd);
+        return EXIT_FAILURE;
+    }
+    
+    //read the root node
+    struct wfs_log_entry rootNode;
+    if (read(disk_fd, &rootNode, sizeof(rootNode)) != sizeof(rootNode)) {
+        perror("Error reading root node");
+        close(disk_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    
+
     return 0;
 }
 
 static int wfs_mknod(const char *path, mode_t mode, dev_t rdev) {
+    //read the superblock
+    struct wfs_sb superblock;
+    if (read(disk_fd, &superblock, sizeof(superblock)) != sizeof(superblock)) {
+        perror("Error reading superblock");
+        close(disk_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    //go past superblock
+    if (lseek(disk_fd, superblock.head, SEEK_SET) == -1) {
+        perror("Error seeking to the position after superblock");
+        close(disk_fd);
+        return EXIT_FAILURE;
+    }
+    
+    //read the root node
+    struct wfs_log_entry rootNode;
+    if (read(disk_fd, &rootNode, sizeof(rootNode)) != sizeof(rootNode)) {
+        perror("Error reading root node");
+        close(disk_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    struct wfs_log_entry newEntry;
+
+    struct wfs_log_entry newFile;
+    struct wfs_inode newFileInode;
+    newFileInode.mode = S_IFREG | 0755;
+    newFileInode.inode_number = 0;
+    newFileInode.links = 1;  // Typically 2 for directories (".", "..")
+    newFileInode.uid = getuid();
+    newFileInode.gid = getgid();
+    newFileInode.atime = time(NULL);
+    newFileInode.mtime = time(NULL);
+    newFileInode.ctime = time(NULL);
+    newFileInode.size = 0;  // No entries yet
+    newFile.inode = newFileInode;
+
+    
+
+    superblock.head += sizeof(newFile);  // Update to the next free space
     return 0;
 }
 
 static int wfs_mkdir(const char *path, mode_t mode) {
-    // Only create the directory "a" at the root
-    if (strcmp(path, "mnt/a") != 0) {
-        printf("TESTSTSETSETSETSE\n");
-        return -EINVAL;  // Invalid path
-    }
-
-    // Read the superblock
-    struct wfs_sb superblock;
-    if (lseek(disk_fd, 0, SEEK_SET) == -1 || 
-        read(disk_fd, &superblock, sizeof(superblock)) != sizeof(superblock)) {
-        perror("Error reading superblock");
-        return -EIO;
-    }
-
-    if (superblock.magic != WFS_MAGIC) {
-        fprintf(stderr, "Invalid filesystem magic number.\n");
-        return -EIO;
-    }
-
-    // Create a new inode for the directory "a"
-    struct wfs_inode new_inode;
-    new_inode.inode_number = superblock.head; // Assign the head as the inode number
-    new_inode.deleted = 0;
-    new_inode.mode = S_IFDIR | (mode & 0777); // Set as directory and apply mode mask
-    new_inode.uid = getuid();
-    new_inode.gid = getgid();
-    new_inode.size = 0;  // Initially empty
-    new_inode.atime = time(NULL);
-    new_inode.mtime = time(NULL);
-    new_inode.ctime = time(NULL);
-    new_inode.links = 2; // Standard for directories (".", "..")
-
-    // Write the inode to the disk
-    struct wfs_log_entry new_entry;
-    new_entry.inode = new_inode;
-    if (lseek(disk_fd, superblock.head, SEEK_SET) == -1 ||
-        write(disk_fd, &new_entry, sizeof(new_entry)) != sizeof(new_entry)) {
-        perror("Error writing new directory inode");
-        return -EIO;
-    }
-
-    // Update the superblock to point to the next free space
-    superblock.head += sizeof(new_entry);  // Update to the next free space
-    if (lseek(disk_fd, 0, SEEK_SET) == -1 ||
-        write(disk_fd, &superblock, sizeof(superblock)) != sizeof(superblock)) {
-        perror("Error updating superblock");
-        return -EIO;
-    }
-
     return 0;
 }
-
-
 
 static int wfs_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
     return 0;
