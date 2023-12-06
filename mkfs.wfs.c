@@ -9,38 +9,46 @@
 #define DISK_SIZE 1048576  // Example size, e.g., 1MB
 
 int main(int argc, char *argv[]) {
+    printf("Program started.\n"); // Indicates the program has started.
+
     if (argc != 2) {
         fprintf(stderr, "Usage: %s disk_path\n", argv[0]);
         return EXIT_FAILURE;
     }
 
+    printf("Disk path provided: %s\n", argv[1]); // Shows the disk path provided.
+
     const char *disk_path = argv[1];
-    int fd = open(disk_path, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+    printf("Attempting to open or create the disk file...\n");
+    int fd = open(disk_path, O_RDWR | O_CREAT);
     if (fd == -1) {
         perror("Error opening or creating disk file");
         return EXIT_FAILURE;
     }
+    printf("Disk file opened or created successfully. fd: %d\n", fd);
 
-    // Ensure the disk is of the correct size (e.g., 1MB)
+    printf("Setting disk size to %d bytes...\n", DISK_SIZE);
     if (ftruncate(fd, DISK_SIZE) == -1) {
         perror("Error setting disk size");
         close(fd);
         return EXIT_FAILURE;
     }
+    printf("Disk size set successfully.\n");
 
-    // Initialize the superblock
+    printf("Initializing superblock...\n");
     struct wfs_sb superblock;
     superblock.magic = WFS_MAGIC;
     superblock.head = sizeof(struct wfs_sb);
 
-    // Write the superblock to the disk image
+    printf("Writing superblock to disk...\n");
     if (write(fd, &superblock, sizeof(superblock)) != sizeof(superblock)) {
         perror("Error writing superblock to disk");
         close(fd);
         return EXIT_FAILURE;
     }
+    printf("Superblock written successfully.\n");
 
-    // Initialize the root directory log entry
+    printf("Initializing root directory log entry...\n");
     struct wfs_log_entry emptyDirectory;
     struct wfs_inode emptyDirectoryInode;
     
@@ -56,18 +64,25 @@ int main(int argc, char *argv[]) {
 
     emptyDirectory.inode = emptyDirectoryInode;
 
-    // Write the root directory log entry to the disk
+    printf("Writing root directory log entry to disk...\n");
     if (write(fd, &emptyDirectory, sizeof(struct wfs_inode)) != sizeof(struct wfs_inode)) {
         perror("Error writing root directory log entry");
         close(fd);
         return EXIT_FAILURE;
     }
+    printf("Root directory log entry written successfully.\n");
 
-    // Update the superblock to point to the next free space
+    printf("Updating superblock to point to the next free space...\n");
     superblock.head += sizeof(struct wfs_inode);  // Update to the next free space
     lseek(fd, 0, SEEK_SET);  // Go back to the beginning of the file
-    write(fd, &superblock, sizeof(superblock));  // Write the updated superblock
+    if (write(fd, &superblock, sizeof(superblock)) != sizeof(superblock)) {
+        perror("Error updating superblock");
+        close(fd);
+        return EXIT_FAILURE;
+    }
+    printf("Superblock updated successfully.\n");
 
     close(fd);
+    printf("Disk file closed. Program finished.\n");
     return EXIT_SUCCESS;
 }
