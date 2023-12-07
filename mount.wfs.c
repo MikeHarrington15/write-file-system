@@ -41,6 +41,7 @@ static struct fuse_operations ops = {
 };
 
 struct wfs_log_entry* looper(const char *path, mode_t mode) {
+    printf("Looper path search: %s\n", path);
     // Check if the global superblock has been mapped
     if (!global_superblock) {
         fprintf(stderr, "Disk file not mapped\n");
@@ -53,9 +54,15 @@ struct wfs_log_entry* looper(const char *path, mode_t mode) {
     struct wfs_log_entry *current_entry;
     struct wfs_log_entry *found_entry = NULL;
 
-    char *rest = strdup(path);
-    char *token = strtok(rest, "/");
-    unsigned int current_inode = 0; // Start with root inode
+    char *token;
+    if (strcmp(path, "/") != 0) {
+        char *rest = strdup(path);
+        token = strtok(rest, "/");
+    } else {
+        char *rest = strdup(path);
+        token = rest;
+    }
+    unsigned int current_inode = 0; // Start with root inode    
 
     while (token != NULL) {
         current_entry = start_of_log;
@@ -63,9 +70,7 @@ struct wfs_log_entry* looper(const char *path, mode_t mode) {
 
         while (current_entry < end_of_log) {
             // Check if the current entry is a directory or file with the correct name and inode
-            if (((S_ISDIR(current_entry->inode.mode) || S_ISREG(current_entry->inode.mode)) &&
-                 strcmp(((struct wfs_dentry *)current_entry->data)->name, token) == 0) &&
-                (current_entry->inode.inode_number == current_inode)) {
+            if ((current_entry->inode.inode_number == current_inode)) {
                 found_entry = current_entry;
                 found = 1;
             }
@@ -73,19 +78,35 @@ struct wfs_log_entry* looper(const char *path, mode_t mode) {
             current_entry = (struct wfs_log_entry *)((char *)current_entry + sizeof(struct wfs_log_entry) + current_entry->inode.size);
         }
 
-        if (!found) {
-            // Token not found in the log, path does not exist
-            free(rest);
+        if (!found || found_entry->inode.deleted == 1) { // also check if deleted
+            // Token not found in the log, path  does not exist
             return NULL;
+        }
+
+        // get found_entry
+        //////--------------------///////////////////
+        // get current_inode
+
+        struct wfs_dentry * current_dentry = (struct wfs_dentry *)found_entry->data;
+        int num_entry = found_entry->inode.size / sizeof(struct wfs_dentry);
+
+        for (int i = 0; i < num_entry; i++) {
+            if (current_dentry->name == token) {
+                current_inode = current_dentry->inode_number;
+            }
+            current_dentry += 1;
         }
 
         // Update inode for the next path component
         current_inode = found_entry->inode.inode_number;
 
+        if (strcmp(path, "/") != 0) {
+            break;
+        }
+
         token = strtok(NULL, "/"); // Move to next token
     }
 
-    free(rest);
     return found_entry; // Return the pointer to the last found entry
 }
 
@@ -93,7 +114,9 @@ static int wfs_getattr(const char *path, struct stat *stbuf) {
     memset(stbuf, 0, sizeof(struct stat)); // Initialize the stat structure
 
     struct wfs_log_entry *entry = looper(path, 0); // Use looper to find the log entry for the path
+    printf("Entry: %p\n", (void *)entry);
     if (!entry) {
+        printf("Entering no entry\n");
         return -ENOENT; // File or directory not found
     }
 
@@ -147,7 +170,7 @@ static int wfs_mknod(const char *path, mode_t mode, dev_t rdev) {
 
     // Create a new log entry for the file
     struct wfs_log_entry *newFileEntry = (struct wfs_log_entry *)((char *)global_superblock + global_superblock->head);
-    newFileEntry->inode.mode = mode;
+    newFileEntry->inode.mode = S_IFREG | mode;
     newInode += 1;
     newFileEntry->inode.inode_number = newInode;
     newFileEntry->inode.links = 1;
@@ -209,7 +232,7 @@ static int wfs_mkdir(const char *path, mode_t mode) {
 
     // Create the new log entry for the directory
     struct wfs_log_entry *newDirEntry = (struct wfs_log_entry *)((char *)global_superblock + global_superblock->head);
-    newDirEntry->inode.mode = mode | S_IFDIR;  // Ensure the mode indicates a directory
+    newDirEntry->inode.mode = S_IFDIR | mode;  // Ensure the mode indicates a directory
     newInode += 1;
     newDirEntry->inode.inode_number = newInode;
     newDirEntry->inode.links = 2; // Directories typically have 2 links (".", "..")
@@ -235,7 +258,26 @@ static int wfs_mkdir(const char *path, mode_t mode) {
 }
 
 static int wfs_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
-    return 0;
+    // Use looper to find the log entry for the file
+    struct wfs_log_entry *file_entry = looper(path, 0);
+    if (!file_entry) {
+        return -ENOENT; // File not found
+    }
+
+    // Check if the offset is valid
+    if (offset >= file_entry->inode.size) {
+        return -EINVAL; // Invalid argument
+    }
+
+    // Calculate the size to read
+    size_t available_size = file_entry->inode.size - offset;
+    size_t read_size = (size < available_size) ? size : available_size;
+
+    // Read the data
+    memcpy(buf, (char *)file_entry->data + offset, read_size);
+
+    // Return the number of bytes read
+    return read_size;
 }
 
 static int wfs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
