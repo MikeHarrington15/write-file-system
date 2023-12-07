@@ -27,6 +27,7 @@ static int wfs_unlink(const char *path);
 // Global file descriptor for the disk file
 int disk_fd = -1;
 int newInode = 0;
+struct wfs_sb *global_superblock = NULL;
 
 // Initialize fuse_operations structure
 static struct fuse_operations ops = {
@@ -40,31 +41,32 @@ static struct fuse_operations ops = {
 };
 
 struct wfs_log_entry* looper(const char *path, mode_t mode) {
-    // Map the disk file into memory
-    struct wfs_sb *superblock = mmap(NULL, DISK_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, disk_fd, 0);
-    if (superblock == MAP_FAILED) {
-        perror("Error mapping disk file");
-        return NULL;  // Return the initialized empty entry on error
+    // Check if the global superblock has been mapped
+    if (!global_superblock) {
+        fprintf(stderr, "Disk file not mapped\n");
+        return NULL;
     }
 
-   // Start from the root node
-    struct wfs_log_entry *start_of_log = (struct wfs_log_entry *)((char *)superblock + sizeof(struct wfs_sb));
-    struct wfs_log_entry *end_of_log = (struct wfs_log_entry *)((char *)superblock + superblock->head);
+    // Start from the root node
+    struct wfs_log_entry *start_of_log = (struct wfs_log_entry *)((char *)global_superblock + sizeof(struct wfs_sb));
+    struct wfs_log_entry *end_of_log = (struct wfs_log_entry *)((char *)global_superblock + global_superblock->head);
     struct wfs_log_entry *current_entry;
-    struct wfs_log_entry *found_entry;
-    memset(&found_entry, 0, sizeof(struct wfs_log_entry));
+    struct wfs_log_entry *found_entry = NULL;
 
     char *rest = strdup(path);
     char *token = strtok(rest, "/");
+    unsigned int current_inode = 0; // Start with root inode
 
     while (token != NULL) {
         current_entry = start_of_log;
         int found = 0;
 
         while (current_entry < end_of_log) {
-            if ((S_ISDIR(current_entry->inode.mode) || S_ISREG(current_entry->inode.mode)) &&
-                strcmp(((struct wfs_dentry *)current_entry->data)->name, token) == 0) {
-                *found_entry = *current_entry;
+            // Check if the current entry is a directory or file with the correct name and inode
+            if (((S_ISDIR(current_entry->inode.mode) || S_ISREG(current_entry->inode.mode)) &&
+                 strcmp(((struct wfs_dentry *)current_entry->data)->name, token) == 0) &&
+                (current_entry->inode.inode_number == current_inode)) {
+                found_entry = current_entry;
                 found = 1;
             }
             // Move to the next log entry
@@ -74,16 +76,17 @@ struct wfs_log_entry* looper(const char *path, mode_t mode) {
         if (!found) {
             // Token not found in the log, path does not exist
             free(rest);
-            munmap(superblock, DISK_SIZE);
             return NULL;
         }
+
+        // Update inode for the next path component
+        current_inode = found_entry->inode.inode_number;
 
         token = strtok(NULL, "/"); // Move to next token
     }
 
     free(rest);
-    munmap(superblock, DISK_SIZE);
-    return found_entry; // Return the last found entry
+    return found_entry; // Return the pointer to the last found entry
 }
 
 static int wfs_getattr(const char *path, struct stat *stbuf) {
@@ -109,10 +112,9 @@ static int wfs_getattr(const char *path, struct stat *stbuf) {
 }
 
 static int wfs_mknod(const char *path, mode_t mode, dev_t rdev) {
-    // Map the disk file into memory
-    struct wfs_sb *superblock = mmap(NULL, DISK_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, disk_fd, 0);
-    if (superblock == MAP_FAILED) {
-        perror("Error mapping disk file");
+    // Check if superblock is properly mapped
+    if (!global_superblock) {
+        fprintf(stderr, "Superblock not mapped\n");
         return -EIO;
     }
 
@@ -121,13 +123,11 @@ static int wfs_mknod(const char *path, mode_t mode, dev_t rdev) {
     strcpy(parent_path, path);
     char *last_slash = strrchr(parent_path, '/');
     if (last_slash == NULL) {
-        munmap(superblock, DISK_SIZE);
         return -ENOENT;  // Invalid path
     }
     *last_slash = '\0'; // Terminate the string to get the parent path
     struct wfs_log_entry *parent_dir_entry = looper(parent_path, S_IFDIR);
     if (!parent_dir_entry) {
-        munmap(superblock, DISK_SIZE);
         return -ENOENT;  // Parent directory not found
     }
 
@@ -135,20 +135,21 @@ static int wfs_mknod(const char *path, mode_t mode, dev_t rdev) {
     struct wfs_dentry newFile;
     strncpy(newFile.name, last_slash + 1, MAX_FILE_NAME_LEN);
     newFile.name[MAX_FILE_NAME_LEN - 1] = '\0'; // Ensure null-termination
-    newFile.inode_number = superblock->head + sizeof(struct wfs_log_entry); // Assign inode number after new dir entry
+    newFile.inode_number = global_superblock->head + sizeof(struct wfs_log_entry); // Assign inode number after new dir entry
 
     // Create a new log entry for the parent directory
-    struct wfs_log_entry *newParentDirEntry = (struct wfs_log_entry *)((char *)superblock + superblock->head);
+    struct wfs_log_entry *newParentDirEntry = (struct wfs_log_entry *)((char *)global_superblock + global_superblock->head);
     *newParentDirEntry = *parent_dir_entry; // Copy the existing parent dir entry
     newParentDirEntry->inode.size += sizeof(struct wfs_dentry); // Increase the size to include new dentry
     memcpy((char *)newParentDirEntry->data + parent_dir_entry->inode.size, &newFile, sizeof(struct wfs_dentry));
 
-    superblock->head += sizeof(struct wfs_log_entry) + newParentDirEntry->inode.size;
+    global_superblock->head += sizeof(struct wfs_log_entry) + newParentDirEntry->inode.size;
 
     // Create a new log entry for the file
-    struct wfs_log_entry *newFileEntry = (struct wfs_log_entry *)((char *)superblock + superblock->head);
+    struct wfs_log_entry *newFileEntry = (struct wfs_log_entry *)((char *)global_superblock + global_superblock->head);
     newFileEntry->inode.mode = mode;
-    newFileEntry->inode.inode_number = newFile.inode_number;
+    newInode += 1;
+    newFileEntry->inode.inode_number = newInode;
     newFileEntry->inode.links = 1;
     newFileEntry->inode.uid = getuid();
     newFileEntry->inode.gid = getgid();
@@ -160,29 +161,22 @@ static int wfs_mknod(const char *path, mode_t mode, dev_t rdev) {
     memcpy(newFileEntry->data, &newFile, sizeof(struct wfs_dentry));
 
     // Update the superblock head to point to the next free space
-    superblock->head += sizeof(struct wfs_log_entry) + newFileEntry->inode.size;
+    global_superblock->head += sizeof(struct wfs_log_entry) + newFileEntry->inode.size;
 
     // Synchronize changes
-    if (msync(superblock, DISK_SIZE, MS_SYNC) == -1) {
+    if (msync(global_superblock, DISK_SIZE, MS_SYNC) == -1) {
         perror("Error syncing changes");
-        munmap(superblock, DISK_SIZE);
-        return -EIO;
-    }
-
-    // Unmap the disk file
-    if (munmap(superblock, DISK_SIZE) == -1) {
-        perror("Error unmapping disk file");
         return -EIO;
     }
 
     return 0;
 }
 
+
 static int wfs_mkdir(const char *path, mode_t mode) {
-    // Map the disk file into memory
-    struct wfs_sb *superblock = mmap(NULL, DISK_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, disk_fd, 0);
-    if (superblock == MAP_FAILED) {
-        perror("Error mapping disk file");
+    // Check if superblock is properly mapped
+    if (!global_superblock) {
+        fprintf(stderr, "Superblock not mapped\n");
         return -EIO;
     }
 
@@ -191,13 +185,11 @@ static int wfs_mkdir(const char *path, mode_t mode) {
     strcpy(parent_path, path);
     char *last_slash = strrchr(parent_path, '/');
     if (last_slash == NULL) {
-        munmap(superblock, DISK_SIZE);
         return -ENOENT;  // Invalid path
     }
     *last_slash = '\0'; // Terminate the string to get the parent path
     struct wfs_log_entry *parent_dir_entry = looper(parent_path, S_IFDIR);
     if (!parent_dir_entry) {
-        munmap(superblock, DISK_SIZE);
         return -ENOENT;  // Parent directory not found
     }
 
@@ -205,20 +197,21 @@ static int wfs_mkdir(const char *path, mode_t mode) {
     struct wfs_dentry newDir;
     strncpy(newDir.name, last_slash + 1, MAX_FILE_NAME_LEN);
     newDir.name[MAX_FILE_NAME_LEN - 1] = '\0'; // Ensure null-termination
-    newDir.inode_number = superblock->head + sizeof(struct wfs_log_entry); // Assign inode number after new dir entry
+    newDir.inode_number = global_superblock->head + sizeof(struct wfs_log_entry); // Assign inode number after new dir entry
 
     // Create a new log entry for the parent directory
-    struct wfs_log_entry *newParentDirEntry = (struct wfs_log_entry *)((char *)superblock + superblock->head);
+    struct wfs_log_entry *newParentDirEntry = (struct wfs_log_entry *)((char *)global_superblock + global_superblock->head);
     *newParentDirEntry = *parent_dir_entry;
     newParentDirEntry->inode.size += sizeof(struct wfs_dentry);
     memcpy((char *)newParentDirEntry->data + parent_dir_entry->inode.size, &newDir, sizeof(struct wfs_dentry));
 
-    superblock->head += sizeof(struct wfs_log_entry) + newParentDirEntry->inode.size;
+    global_superblock->head += sizeof(struct wfs_log_entry) + newParentDirEntry->inode.size;
 
     // Create the new log entry for the directory
-    struct wfs_log_entry *newDirEntry = (struct wfs_log_entry *)((char *)superblock + superblock->head);
+    struct wfs_log_entry *newDirEntry = (struct wfs_log_entry *)((char *)global_superblock + global_superblock->head);
     newDirEntry->inode.mode = mode | S_IFDIR;  // Ensure the mode indicates a directory
-    newDirEntry->inode.inode_number = newDir.inode_number;
+    newInode += 1;
+    newDirEntry->inode.inode_number = newInode;
     newDirEntry->inode.links = 2; // Directories typically have 2 links (".", "..")
     newDirEntry->inode.uid = getuid();
     newDirEntry->inode.gid = getgid();
@@ -227,18 +220,14 @@ static int wfs_mkdir(const char *path, mode_t mode) {
     newDirEntry->inode.ctime = time(NULL);
     newDirEntry->inode.size = sizeof(struct wfs_log_entry); // No additional data for the directory
 
-    superblock->head += sizeof(struct wfs_log_entry);
+    memcpy(newDirEntry->data, &newDir, sizeof(struct wfs_dentry));
+
+    // Update the superblock head to point to the next free space
+    global_superblock->head += sizeof(struct wfs_log_entry) + newDirEntry->inode.size;
 
     // Synchronize changes
-    if (msync(superblock, DISK_SIZE, MS_SYNC) == -1) {
+    if (msync(global_superblock, DISK_SIZE, MS_SYNC) == -1) {
         perror("Error syncing changes");
-        munmap(superblock, DISK_SIZE);
-        return -EIO;
-    }
-
-    // Unmap the disk file
-    if (munmap(superblock, DISK_SIZE) == -1) {
-        perror("Error unmapping disk file");
         return -EIO;
     }
 
@@ -262,23 +251,36 @@ static int wfs_unlink(const char *path) {
 }
 
 int main(int argc, char *argv[]) {
-    const char *disk_path = argv[2];
-    disk_fd = open(disk_path, O_RDWR);
+    if (argc < 3) {
+        fprintf(stderr, "Usage: %s <disk_image> <mount_point> [FUSE options]\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    // Open the disk image file
+    disk_fd = open(argv[argc - 2], O_RDWR);
     if (disk_fd == -1) {
         perror("Error opening disk file");
         return EXIT_FAILURE;
     }
 
-    printf("Disk file opened. File descriptor: %d\n", disk_fd);
+    // Map the disk image into memory
+    global_superblock = mmap(NULL, DISK_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, disk_fd, 0);
+    if (global_superblock == MAP_FAILED) {
+        perror("Error mapping disk file");
+        close(disk_fd);
+        return EXIT_FAILURE;
+    }
 
-    argv[argc-2] = argv[argc-1];
-    argv[argc-1] = NULL;
-    --argc;
-    
+    // Adjust argv for FUSE
+    argv[argc - 2] = argv[argc - 1];
+    argv[argc - 1] = NULL;
+    argc--;
+
     int fuse_stat = fuse_main(argc, argv, &ops, NULL);
 
+    // Unmap the disk file and close it
+    munmap(global_superblock, DISK_SIZE);
     close(disk_fd);
-    printf("Disk file closed.\n");
 
     return fuse_stat;
 }
