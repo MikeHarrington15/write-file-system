@@ -392,7 +392,41 @@ static int wfs_read(const char *path, char *buf, size_t size, off_t offset, stru
 }
 
 static int wfs_write(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi) {
-    return 0;
+    // Use looper to find the log entry for the file
+    struct wfs_log_entry *file_entry = looper(path, 0);
+    printf("Write path: %s", path);
+    if (!file_entry) {
+        return -ENOENT; // File not found
+    }
+
+    // Check if the offset is valid
+    if (offset > file_entry->inode.size) {
+        return -EINVAL; // Invalid argument
+    }
+
+    // Calculate the size to write
+    size_t available_size = file_entry->inode.size - offset;
+    size_t write_size = (size < available_size) ? size : available_size;
+
+    // Write the data at the specified offset
+    memcpy((char *)file_entry->data + offset, buf, write_size);
+
+    // Update the file size if necessary
+    if (offset + write_size > file_entry->inode.size) {
+        file_entry->inode.size = offset + write_size;
+    }
+
+    // Update the modification time
+    file_entry->inode.mtime = time(NULL);
+
+    // Synchronize changes
+    if (msync(global_superblock, DISK_SIZE, MS_SYNC) == -1) {
+        perror("Error syncing changes");
+        return -EIO;
+    }
+
+    // Return the number of bytes written
+    return write_size;
 }
 
 static int wfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi) {
@@ -400,6 +434,38 @@ static int wfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_
 }
 
 static int wfs_unlink(const char *path) {
+    if (!global_superblock) {
+        fprintf(stderr, "Superblock not mapped\n");
+        return -EIO;
+    }
+
+    // struct wfs_log_entry *unlinkEntry = looper(path, S_IFREG);
+    // unlinkEntry->inode.deleted = 1;
+    // const char *lastSlash = strrchr(path, '/');
+    // char *unlinkentryName;
+    // strcpy(unlinkentryName, lastSlash + 1);
+
+    // // Calculate the length up to the last '/'
+    // size_t length = lastSlash - path;
+    // char *newPath;
+    // // Copy the parent path into the provided buffer
+    // strncpy(newPath, path, length);
+    // struct wfs_log_entry *oldParent = looper(newPath, S_IFDIR);
+    // struct wfs_log_entry *newParentEntry; 
+
+    // int index = 0;
+    // while(oldParent->data[index] != NULL) {
+    //     struct wfs_dentry *currentIndex = (struct wfs_dentry *)oldParent->data[index];
+    //     const char currentIndexName = &currentIndex.name;
+    //     if (strcmp(currentIndexName, unlinkentryName) == 0) {
+    //         index++;
+    //         continue;
+    //     } else {
+            
+    //         index++;
+    //     }
+    // }
+
     return 0;
 }
 
