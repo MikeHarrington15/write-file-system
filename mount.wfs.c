@@ -26,7 +26,6 @@ static int wfs_unlink(const char *path);
 
 // Global file descriptor for the disk file
 int disk_fd = -1;
-int newInode = 5; // arbitrary number that is not 0 or 1
 struct wfs_sb *global_superblock = NULL;
 
 // Initialize fuse_operations structure
@@ -39,6 +38,24 @@ static struct fuse_operations ops = {
     .readdir	= wfs_readdir,
     .unlink    	= wfs_unlink,
 };
+
+int find_new_inode() {
+    int newInode = 0;
+
+    struct wfs_log_entry *start_of_log = (struct wfs_log_entry *)((char *)global_superblock + sizeof(struct wfs_sb));
+    struct wfs_log_entry *end_of_log = (struct wfs_log_entry *)((char *)global_superblock + global_superblock->head);
+    struct wfs_log_entry *current_entry = start_of_log;
+
+    while (current_entry < end_of_log) {
+        // Check if the current entry is a directory or file with the correct name and inode
+        if ((current_entry->inode.inode_number > newInode)) {
+            newInode = current_entry->inode.inode_number;
+        }
+        current_entry = (struct wfs_log_entry *)((char *)current_entry + sizeof(struct wfs_log_entry) + current_entry->inode.size);
+    }
+
+    return newInode + 1;
+}
 
 struct wfs_log_entry* find_entry_by_inode(int inode) {
     struct wfs_log_entry *start_of_log = (struct wfs_log_entry *)((char *)global_superblock + sizeof(struct wfs_sb));
@@ -125,11 +142,11 @@ struct wfs_log_entry* looper(const char *path, mode_t mode) {
         struct wfs_dentry *current_dentry = (struct wfs_dentry *)found_entry->data;
         int num_entry = found_entry->inode.size / sizeof(struct wfs_dentry);
 
-        printf("Listing all dentries in found_entry:\n");
-        for (int i = 0; i < num_entry; i++) {
-            printf("Dentry %d: Name: %s, Inode Number: %lu\n", i, current_dentry->name, current_dentry->inode_number);
-            current_dentry += 1;
-        }
+        // printf("Listing all dentries in found_entry:\n");
+        // for (int i = 0; i < num_entry; i++) {
+        //     printf("Dentry %d: Name: %s, Inode Number: %lu\n", i, current_dentry->name, current_dentry->inode_number);
+        //     current_dentry += 1;
+        // }
 
         // Reset current_dentry to the start position before the main loop
         current_dentry = (struct wfs_dentry *)found_entry->data;
@@ -157,12 +174,12 @@ struct wfs_log_entry* looper(const char *path, mode_t mode) {
 
         token = strtok(NULL, "/"); // Move to next token
     }
-    printf("Found entry: %d\n", found_entry->inode.inode_number);
     
-    return find_entry_by_inode(current_inode);; // Return the pointer to the last found entry
+    return find_entry_by_inode(current_inode); // Return the pointer to the last found entry
 }
 
 static int wfs_getattr(const char *path, struct stat *stbuf) {
+    printf("GetAttr ******************************\n");
     printf("Get path: %s\n", path);
     memset(stbuf, 0, sizeof(struct stat)); // Initialize the stat structure
 
@@ -235,15 +252,16 @@ static int wfs_mknod(const char *path, mode_t mode, dev_t rdev) {
     struct wfs_dentry newFile;
     strncpy(newFile.name, new_path, MAX_FILE_NAME_LEN);
     newFile.name[MAX_FILE_NAME_LEN - 1] = '\0'; // Ensure null-termination
-    newInode += 1;
+    int newInode = find_new_inode();
     newFile.inode_number = newInode; // Assign inode number after new dir entry
     printf("Created new dentry with name %s\n", newFile.name);
 
     // Create a new log entry for the parent directory
     struct wfs_log_entry *newParentDirEntry = (struct wfs_log_entry *)((char *)global_superblock + global_superblock->head);
     *newParentDirEntry = *parent_dir_entry; // Copy the existing parent dir entry
-    newParentDirEntry->inode.size += sizeof(struct wfs_dentry); // Increase the size to include new dentry
-    memcpy((char *)newParentDirEntry->data + parent_dir_entry->inode.size, &newFile, sizeof(struct wfs_dentry));
+    newParentDirEntry->inode.size = parent_dir_entry->inode.size + sizeof(struct wfs_dentry);
+    memcpy(newParentDirEntry->data, parent_dir_entry->data, parent_dir_entry->inode.size);
+    memcpy((char *)newParentDirEntry->data , &newFile, sizeof(struct wfs_dentry));
 
     global_superblock->head += sizeof(struct wfs_log_entry) + newParentDirEntry->inode.size;
 
@@ -257,7 +275,7 @@ static int wfs_mknod(const char *path, mode_t mode, dev_t rdev) {
     newFileEntry->inode.atime = time(NULL);
     newFileEntry->inode.mtime = time(NULL);
     newFileEntry->inode.ctime = time(NULL);
-    newFileEntry->inode.size = sizeof(struct wfs_log_entry) + sizeof(struct wfs_dentry);
+    newFileEntry->inode.size = sizeof(struct wfs_log_entry);
 
     memcpy(newFileEntry->data, &newFile, sizeof(struct wfs_dentry));
 
@@ -276,7 +294,7 @@ static int wfs_mknod(const char *path, mode_t mode, dev_t rdev) {
 
 
 static int wfs_mkdir(const char *path, mode_t mode) {
-    printf("Entering mkdir path: %s *****************************\n", path);
+    printf("Entering mkdir path: %s >>>>>>>>>>>>>>>>>>>>>>>>>>\n", path);
     // Check if superblock is properly mapped
     if (!global_superblock) {
         fprintf(stderr, "Superblock not mapped\n");
@@ -328,17 +346,37 @@ static int wfs_mkdir(const char *path, mode_t mode) {
     struct wfs_dentry newDir;
     strncpy(newDir.name, new_dir, MAX_FILE_NAME_LEN);
     newDir.name[MAX_FILE_NAME_LEN - 1] = '\0'; // Ensure null-termination
-    newInode += 1;
+    printf("newDir name: %s\n", newDir.name);
+    int newInode = find_new_inode();
     newDir.inode_number = newInode; // Assign inode number after new dir entry
-    printf("Created new dentry with name %s\n", newDir.name);
+    printf("Created new dentry with name %s and inode: %ld\n", newDir.name, newDir.inode_number);
+
+    struct wfs_dentry *current_dentry = (struct wfs_dentry *)parent_dir_entry->data;
+    int num_entry = parent_dir_entry->inode.size / sizeof(struct wfs_dentry);
+    printf("Listing all dentries in parent_dir_entry\n");
+    for (int i = 0; i < num_entry; i++) {
+        printf("Dentry %d: Name: %s, Inode Number: %lu\n", i, current_dentry->name, current_dentry->inode_number);
+        current_dentry += 1;
+    }
+
 
     // Create a new log entry for the parent directory
     struct wfs_log_entry *newParentDirEntry = (struct wfs_log_entry *)((char *)global_superblock + global_superblock->head);
     *newParentDirEntry = *parent_dir_entry;
-    newParentDirEntry->inode.size += sizeof(struct wfs_dentry);
-    memcpy((char *)newParentDirEntry->data + parent_dir_entry->inode.size, &newDir, sizeof(struct wfs_dentry));
+    newParentDirEntry->inode.size = parent_dir_entry->inode.size + sizeof(struct wfs_dentry);
+    memcpy(newParentDirEntry->data, parent_dir_entry->data, parent_dir_entry->inode.size);
+    memcpy((char *)newParentDirEntry->data , &newDir, sizeof(struct wfs_dentry));
 
     global_superblock->head += sizeof(struct wfs_log_entry) + newParentDirEntry->inode.size;
+
+    current_dentry = (struct wfs_dentry *)newParentDirEntry->data;
+    num_entry = newParentDirEntry->inode.size / sizeof(struct wfs_dentry);
+    printf("Listing all dentries in new parent_dir_entry\n");
+    for (int i = 0; i < num_entry; i++) {
+        printf("Dentry %d: Name: %s, Inode Number: %lu\n", i, current_dentry->name, current_dentry->inode_number);
+        current_dentry += 1;
+    }
+
 
     // Create the new log entry for the directory
     struct wfs_log_entry *newDirEntry = (struct wfs_log_entry *)((char *)global_superblock + global_superblock->head);
@@ -434,38 +472,6 @@ static int wfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_
 }
 
 static int wfs_unlink(const char *path) {
-    if (!global_superblock) {
-        fprintf(stderr, "Superblock not mapped\n");
-        return -EIO;
-    }
-
-    // struct wfs_log_entry *unlinkEntry = looper(path, S_IFREG);
-    // unlinkEntry->inode.deleted = 1;
-    // const char *lastSlash = strrchr(path, '/');
-    // char *unlinkentryName;
-    // strcpy(unlinkentryName, lastSlash + 1);
-
-    // // Calculate the length up to the last '/'
-    // size_t length = lastSlash - path;
-    // char *newPath;
-    // // Copy the parent path into the provided buffer
-    // strncpy(newPath, path, length);
-    // struct wfs_log_entry *oldParent = looper(newPath, S_IFDIR);
-    // struct wfs_log_entry *newParentEntry; 
-
-    // int index = 0;
-    // while(oldParent->data[index] != NULL) {
-    //     struct wfs_dentry *currentIndex = (struct wfs_dentry *)oldParent->data[index];
-    //     const char currentIndexName = &currentIndex.name;
-    //     if (strcmp(currentIndexName, unlinkentryName) == 0) {
-    //         index++;
-    //         continue;
-    //     } else {
-            
-    //         index++;
-    //     }
-    // }
-
     return 0;
 }
 
